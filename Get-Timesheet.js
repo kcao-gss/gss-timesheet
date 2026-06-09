@@ -105,6 +105,31 @@ function askPassword(question) {
     });
 }
 
+// Count punch rows in a CSV, treating any read/parse failure as 0.
+function punchRowCount(p) {
+    try { return fs.existsSync(p) ? parseCSV(p).length : 0; }
+    catch { return 0; }
+}
+
+// Pick the last good timesheet to fall back on when a fresh export is empty:
+// prefer the current week's existing file, else the most-recently-modified
+// timesheets/*.csv that actually contains punch data. Returns null if nothing
+// usable exists.
+function lastGoodTimesheet(outputPath) {
+    if (punchRowCount(outputPath) > 0) return outputPath;
+    const dir = path.dirname(outputPath);
+    let candidates = [];
+    try {
+        candidates = fs.readdirSync(dir)
+            .filter(f => f.endsWith('.csv'))
+            .map(f => path.join(dir, f))
+            .filter(p => p !== outputPath && punchRowCount(p) > 0)
+            .map(p => ({ p, mtime: fs.statSync(p).mtimeMs }))
+            .sort((a, b) => b.mtime - a.mtime);
+    } catch { /* timesheets dir missing — no candidates */ }
+    return candidates.length ? candidates[0].p : null;
+}
+
 // ── CLI args ──────────────────────────────────────────────────────────────────
 
 function parseArgs() {
@@ -131,17 +156,21 @@ function showTodayStats(rows) {
         .filter(r => {
             const s = r['Start Date'].trim();
             return s && new Date(s).toISOString().slice(0, 10) === todayKey;
-        })
-        .sort((a, b) => new Date(a['Time In '].trim()) - new Date(b['Time In '].trim()));
+        });
 
     if (!todayRows.length) return;
 
-    const punches = todayRows.map(r => ({
-        timeIn:  combineDateTime(r['Start Date'], r['Time In ']),
-        active:  r['End Date'].includes('1900'),
-        timeOut: r['End Date'].includes('1900') ? null : combineDateTime(r['End Date'], r['Time Out ']),
-        mins:    parseInt(r['Hours'].trim(), 10),
-    }));
+    // Sort by real Date objects — sorting on the bare 'Time In ' string (e.g. "07:57 AM")
+    // gives Invalid Date and leaves rows in the portal's newest-first export order,
+    // which breaks break detection and the "Clocked in" time.
+    const punches = todayRows
+        .map(r => ({
+            timeIn:  combineDateTime(r['Start Date'], r['Time In ']),
+            active:  r['End Date'].includes('1900'),
+            timeOut: r['End Date'].includes('1900') ? null : combineDateTime(r['End Date'], r['Time Out ']),
+            mins:    parseInt(r['Hours'].trim(), 10),
+        }))
+        .sort((a, b) => a.timeIn - b.timeIn);
 
     const isActive       = punches.some(p => p.active);
     const totalTodayMins = punches.reduce((s, p) => s + p.mins, 0);
@@ -439,20 +468,39 @@ async function promptAndSaveCredentials() {
     outputPath = path.resolve(outputPath);
 
     // ── Scrape + display ──────────────────────────────────────────────────────
+    // Download to a temp file first so a glitchy empty export can never clobber
+    // a previously-good CSV.
+    const tmpPath = outputPath + '.download';
     try {
-        await scrape(username, password, args.startDate, args.endDate, outputPath);
+        await scrape(username, password, args.startDate, args.endDate, tmpPath);
     } catch (err) {
         if (err.code !== 'LOGIN_FAILED') throw err;
         console.log(col.yellow('\nSaved credentials were rejected. Please re-enter them.'));
         await keytar.deletePassword(SERVICE, 'username');
         await keytar.deletePassword(SERVICE, 'password');
         ({ username, password } = await promptAndSaveCredentials());
-        await scrape(username, password, args.startDate, args.endDate, outputPath);
+        await scrape(username, password, args.startDate, args.endDate, tmpPath);
     }
 
-    const rowCount = parseCSV(outputPath).length;
-    console.log(col.green(`Saved: ${outputPath}  (${rowCount} rows)`));
-    showWeekStats(outputPath);
+    const newRows = punchRowCount(tmpPath);
+    if (newRows > 0) {
+        // Good data — promote the temp file to the real week file.
+        fs.renameSync(tmpPath, outputPath);
+        console.log(col.green(`Saved: ${outputPath}  (${newRows} rows)`));
+        showWeekStats(outputPath);
+    } else {
+        // Portal returned empty or malformed CSV — discard it and fall back.
+        fs.rmSync(tmpPath, { force: true });
+        console.log(col.yellow('Portal returned no punch data — keeping last good timesheet.'));
+        const fallback = lastGoodTimesheet(outputPath);
+        if (fallback) {
+            console.log(col.gray(`Showing: ${fallback}`));
+            showWeekStats(fallback);
+        } else {
+            console.log(col.yellow('No previous timesheet available to fall back on.'));
+            showWeekStats(outputPath); // renders "No punch data found."
+        }
+    }
 
 })().catch(err => {
     console.error(col.red(`\nERROR: ${err.message}`));
