@@ -1,0 +1,6 @@
+{
+  "dependencies": {
+    "keytar": "^7.9.0",
+    "playwright": "^1.60.0"
+  }
+}
