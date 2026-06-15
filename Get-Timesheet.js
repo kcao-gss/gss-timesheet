@@ -179,10 +179,11 @@ function lastGoodTimesheet(outputPath, now = new Date()) {
 
 function parseArgs() {
     const argv = process.argv.slice(2);
-    const args = { saveCredential: false, startDate: '', endDate: '', outputPath: '' };
+    const args = { saveCredential: false, startDate: '', endDate: '', outputPath: '', cli: false };
     for (let i = 0; i < argv.length; i++) {
         const key = argv[i].replace(/^-+/, '').toLowerCase();
         if (key === 'savecredential') { args.saveCredential = true; continue; }
+        if (key === 'cli')            { args.cli = true; continue; }
         const val = (i + 1 < argv.length && !argv[i + 1].startsWith('-')) ? argv[++i] : '';
         if      (key === 'startdate'  || key === 'start-date')  args.startDate  = val;
         else if (key === 'enddate'    || key === 'end-date')    args.endDate    = val;
@@ -275,11 +276,12 @@ function bar20(pct) {
     return '█'.repeat(filled) + '░'.repeat(20 - filled);
 }
 
-function showClaudeUsage() {
+// Scan ~/.claude logs and return token usage vs. the self-set budgets — pure data,
+// so both the CLI bars and the desktop card render from it. Returns { available:false }
+// when there are no Claude logs on this machine.
+function computeClaudeUsage(now = new Date()) {
     const root = path.join(require('os').homedir(), '.claude', 'projects');
-    if (!fs.existsSync(root)) return;
-
-    const now = new Date();
+    if (!fs.existsSync(root)) return { available: false };
 
     // Weekly window: most recent WEEKLY_RESET day/hour at or before now.
     const weekStart = new Date(now);
@@ -318,21 +320,202 @@ function showClaudeUsage() {
         return h >= 24 ? `${Math.floor(h / 24)}d ${h % 24}h` : `${h}h ${m}m`;
     };
     const fmtReset = d => d.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
-    const colFor   = p => p >= 90 ? col.red : p >= 70 ? col.yellow : s => s;
 
     const sessPct   = Math.floor(100 * sessTok / SESSION_BUDGET);
     const weekPct    = Math.floor(100 * weekTok / WEEKLY_BUDGET);
     const sessReset  = sessFirst ? new Date(sessFirst.getTime() + 5 * 3600 * 1000) : null;
     const weekReset  = new Date(weekStart.getTime() + 7 * 24 * 3600 * 1000);
 
+    return {
+        available: true,
+        session: { pct: sessPct, used: formatTokens(sessTok), budget: formatTokens(SESSION_BUDGET),
+                   reset: sessReset ? 'resets in ' + until(sessReset) : 'idle' },
+        weekly:  { pct: weekPct, used: formatTokens(weekTok), budget: formatTokens(WEEKLY_BUDGET),
+                   reset: `resets ${fmtReset(weekReset)}  (${until(weekReset)})` },
+    };
+}
+
+function showClaudeUsage() {
+    const u = computeClaudeUsage();
+    if (!u.available) return;
+    const colFor = p => p >= 90 ? col.red : p >= 70 ? col.yellow : s => s;
+
     console.log(col.gray('  ' + '-'.repeat(50)));
     console.log(col.cyan('  Claude Code  --  Usage'));
     console.log('');
-    console.log(colFor(sessPct)(`  ${'Session'.padEnd(8)} [${bar20(sessPct)}] ${String(sessPct).padStart(3)}%  ${formatTokens(sessTok)}/${formatTokens(SESSION_BUDGET)}`));
-    console.log(col.gray(`  ${''.padEnd(8)} ${sessReset ? 'resets in ' + until(sessReset) : 'idle'}`));
-    console.log(colFor(weekPct)(`  ${'Weekly'.padEnd(8)} [${bar20(weekPct)}] ${String(weekPct).padStart(3)}%  ${formatTokens(weekTok)}/${formatTokens(WEEKLY_BUDGET)}`));
-    console.log(col.gray(`  ${''.padEnd(8)} resets ${fmtReset(weekReset)}  (${until(weekReset)})`));
+    console.log(colFor(u.session.pct)(`  ${'Session'.padEnd(8)} [${bar20(u.session.pct)}] ${String(u.session.pct).padStart(3)}%  ${u.session.used}/${u.session.budget}`));
+    console.log(col.gray(`  ${''.padEnd(8)} ${u.session.reset}`));
+    console.log(colFor(u.weekly.pct)(`  ${'Weekly'.padEnd(8)} [${bar20(u.weekly.pct)}] ${String(u.weekly.pct).padStart(3)}%  ${u.weekly.used}/${u.weekly.budget}`));
+    console.log(col.gray(`  ${''.padEnd(8)} ${u.weekly.reset}`));
     console.log('');
+}
+
+// Build a plain data model for the current week — pure (no console I/O), so the
+// desktop UI and the CLI can both render from it and it can be unit-tested.
+// NOTE: the legacy console renderer (showWeekStats, behind --cli) keeps its own
+// copy of the Friday-estimate math; keep the two in sync if the algorithm changes.
+function computeWeekModel(allRows, now = new Date()) {
+    const TARGET = 2400, DAY_TARGET = 480;
+    const rows = rowsInCurrentWeek(allRows, now);
+
+    const moOff   = now.getDay() === 0 ? -6 : 1 - now.getDay();
+    const weekMon = new Date(now);
+    weekMon.setDate(now.getDate() + moOff);
+    weekMon.setHours(0, 0, 0, 0);
+    const weekOf = weekMon.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+
+    if (!rows.length) return { hasData: false, weekOf };
+
+    const dayKey = d => d.toISOString().slice(0, 10);
+    const workDays = {};
+    let totalMins = 0, isActive = false;
+    for (const row of rows) {
+        const mins   = rowMins(row, now);
+        totalMins   += mins;
+        const key    = new Date(row['Start Date'].trim()).toISOString().slice(0, 10);
+        const timeIn = combineDateTime(row['Start Date'], row['Time In ']);
+        const active = isLivePunch(row, now);
+        if (active) isActive = true;
+        (workDays[key] = workDays[key] || []).push({ timeIn, active, mins });
+    }
+
+    const daysWorked    = Object.keys(workDays).length;
+    const todayKey      = now.toISOString().slice(0, 10);
+    const completedKeys = Object.keys(workDays).filter(k => k !== todayKey);
+    const completedMins = completedKeys.reduce(
+        (s, k) => s + workDays[k].reduce((a, p) => a + p.mins, 0), 0);
+    const avgMinsPerDay = completedKeys.length
+        ? Math.floor(completedMins / completedKeys.length)
+        : DAY_TARGET; // 8 h fallback when no completed days exist yet (e.g. Mon AM)
+    const remaining     = Math.max(0, TARGET - totalMins);
+    const overtime      = Math.max(0, totalMins - TARGET);
+
+    const dayNames = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    const days = [];
+    for (let i = 0; i < 7; i++) {
+        const d = new Date(weekMon);
+        d.setDate(weekMon.getDate() + i);
+        d.setHours(0, 0, 0, 0);
+        const punches = workDays[dayKey(d)] || [];
+        const mins    = punches.reduce((s, p) => s + p.mins, 0);
+        const weekend = i >= 5;
+        days.push({
+            name:    dayNames[i],
+            date:    d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' }),
+            mins,
+            hm:      mins ? formatHM(mins) : '--',
+            pct:     Math.min(100, Math.round(100 * mins / DAY_TARGET)),
+            active:  punches.some(p => p.active),
+            worked:  mins > 0,
+            full:    mins >= DAY_TARGET,
+            weekend,
+            show:    !weekend || mins > 0,
+        });
+    }
+
+    // ── Friday estimate ──────────────────────────────────────────────────────
+    const fmt          = d => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    const dayIndexMap  = [null, 0, 1, 2, 3, 4, null]; // Sun=null, Mon=0..Fri=4, Sat=null
+    const dayIndex     = dayIndexMap[now.getDay()];
+    const friday       = { applicable: dayIndex !== null };
+
+    if (dayIndex !== null) {
+        const avgStartMins = Math.floor(
+            Object.values(workDays).reduce((sum, punches) => {
+                const first = [...punches].sort((a, b) => a.timeIn - b.timeIn)[0];
+                return sum + first.timeIn.getHours() * 60 + first.timeIn.getMinutes();
+            }, 0) / daysWorked);
+        const avgStartRef = new Date(now); avgStartRef.setHours(0, avgStartMins, 0, 0);
+        const todayWorked = (workDays[todayKey] || []).reduce((s, p) => s + p.mins, 0);
+
+        if (remaining === 0) {
+            friday.kind = 'done';
+        } else if (dayIndex === 4 && isActive) {
+            friday.kind     = 'friday-active';
+            friday.clockOut = fmt(new Date(now.getTime() + remaining * 60000));
+            friday.needHM   = formatHM(remaining);
+        } else if (dayIndex === 4) {
+            const clockOut = new Date(now); clockOut.setHours(0, avgStartMins + todayWorked + remaining, 0, 0);
+            friday.kind     = 'friday-inactive';
+            friday.clockOut = fmt(clockOut);
+            friday.needHM   = formatHM(remaining);
+        } else {
+            const todayProjected = Math.max(todayWorked, avgMinsPerDay);
+            const daysAfterToday = 3 - dayIndex;
+            const projThruThu    = completedMins + todayProjected + avgMinsPerDay * daysAfterToday;
+            const fridayNeed     = Math.max(0, TARGET - projThruThu);
+            if (fridayNeed === 0) {
+                friday.kind = 'ahead';
+            } else {
+                const daysToFri   = 4 - dayIndex;
+                const fridayStart = new Date(now);
+                fridayStart.setDate(now.getDate() + daysToFri);
+                fridayStart.setHours(0, avgStartMins, 0, 0);
+                friday.kind          = 'need';
+                friday.needMins      = fridayNeed;
+                friday.needHM        = formatHM(fridayNeed);
+                friday.fridayDateStr = fridayStart.toLocaleDateString('en-US', { weekday: 'short', month: 'numeric', day: 'numeric' });
+                friday.avgStart      = fmt(avgStartRef);
+                friday.fridayClockOut = fmt(new Date(fridayStart.getTime() + fridayNeed * 60000));
+                friday.avgPerDayHM   = formatHM(avgMinsPerDay);
+            }
+        }
+    }
+
+    return {
+        hasData: true, weekOf,
+        totalMins, totalHM: formatHM(totalMins),
+        remaining, remainingHM: formatHM(remaining),
+        overtime, overtimeHM: formatHM(overtime),
+        targetMins: TARGET, targetReached: remaining === 0,
+        daysWorked, avgMinsPerDay, avgPerDayHM: formatHM(avgMinsPerDay),
+        isActive, days, friday,
+    };
+}
+
+// Today's-card model — pure. Per the desktop design the break is a fixed default
+// lunch (informational); clock-out-by uses the existing worked-hours math.
+function computeTodayModel(allRows, now = new Date()) {
+    const todayKey  = now.toISOString().slice(0, 10);
+    const todayRows = allRows.filter(r => {
+        const s = r['Start Date'].trim();
+        return s && new Date(s).toISOString().slice(0, 10) === todayKey;
+    });
+    if (!todayRows.length) return { hasData: false };
+
+    const fmt = d => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
+    const punches = todayRows.map(r => ({
+        timeIn: combineDateTime(r['Start Date'], r['Time In ']),
+        active: r['End Date'].includes('1900'),
+        mins:   rowMins(r, now),
+    })).sort((a, b) => a.timeIn - b.timeIn);
+
+    const isActive       = punches.some(p => p.active);
+    const totalTodayMins = punches.reduce((s, p) => s + p.mins, 0);
+    const completedMins  = punches.filter(p => !p.active).reduce((s, p) => s + p.mins, 0);
+    const deficit        = 480 - totalTodayMins;
+
+    const model = {
+        hasData:   true,
+        clockedIn: fmt(punches[0].timeIn),
+        breakStr:  '12:00 PM – 1:00 PM', // fixed default lunch (informational only)
+        totalHM:   formatHM(totalTodayMins),
+        isActive,
+    };
+    if (deficit <= 0) {
+        model.status = 'done';
+        model.overHM = formatHM(-deficit);
+    } else if (isActive) {
+        const active   = [...punches].filter(p => p.active).pop();
+        const clockOut = new Date(active.timeIn.getTime() + (480 - completedMins) * 60000);
+        model.status      = 'clockout';
+        model.clockOutBy  = fmt(clockOut);
+        model.remainingHM = formatHM(deficit);
+    } else {
+        model.status      = 'need';
+        model.remainingHM = formatHM(deficit);
+    }
+    return model;
 }
 
 function showWeekStats(csvPath) {
@@ -476,14 +659,14 @@ function showWeekStats(csvPath) {
 
 const jsClick = (page, id) => page.evaluate(id => document.getElementById(id).click(), id);
 
-async function scrape(username, password, startDate, endDate, outputPath) {
+async function scrape(username, password, startDate, endDate, outputPath, log = console.log) {
     const browser = await chromium.launch({ headless: true });
     const context = await browser.newContext({ acceptDownloads: true });
     const page    = await context.newPage();
 
     try {
         // ── Login ──────────────────────────────────────────────────────────
-        console.log('Logging in...');
+        log('Logging in...');
         // 'domcontentloaded' instead of default 'load' — a hanging third-party
         // resource can stall the load event past 30s even though the form is
         // ready; the waitForSelector below is the real readiness check.
@@ -505,10 +688,10 @@ async function scrape(username, password, startDate, endDate, outputPath) {
             loginErr.code = 'LOGIN_FAILED';
             throw loginErr;
         }
-        console.log('Logged in.');
+        log('Logged in.');
 
         // ── Time & Attendance ──────────────────────────────────────────────
-        console.log('Loading Time and Attendance...');
+        log('Loading Time and Attendance...');
         await page.goto('https://www.gss-service.com/TimeAttendance/Index', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForSelector('[name="StartDateSearch2"]');
 
@@ -532,7 +715,7 @@ async function scrape(username, password, startDate, endDate, outputPath) {
         await page.waitForLoadState('networkidle');
 
         // ── Export CSV ─────────────────────────────────────────────────────
-        console.log('Exporting CSV...');
+        log('Exporting CSV...');
 
         const downloadPromise = page.waitForEvent('download', { timeout: 15000 });
 
@@ -584,17 +767,82 @@ async function promptAndSaveCredentials() {
     return { username, password };
 }
 
-async function main() {
-    // Ensure Chromium is installed
+// Make sure Playwright's Chromium is present; download once if not. `log` lets the
+// desktop app surface the one-time download notice in its loading view.
+async function ensureChromium(log = console.log) {
     try {
         const b = await chromium.launch({ headless: true });
         await b.close();
     } catch {
-        console.log('Downloading Chromium (one-time, ~100MB)...');
+        log('Downloading Chromium (one-time, ~100MB)...');
         execSync('npx playwright install chromium', { cwd: __dirname, stdio: 'inherit' });
     }
+}
 
+function defaultOutputPath() {
+    const dir = path.join(__dirname, 'timesheets');
+    fs.mkdirSync(dir, { recursive: true });
+    const now = new Date();
+    return path.resolve(path.join(dir, `timesheet-${now.getFullYear()}-W${isoWeek(now)}.csv`));
+}
+
+// Resolve a freshly-downloaded temp export against the empty-export fallback, then
+// build the display models. Shared by the CLI and the desktop app.
+function resolveFetched(outputPath, tmpPath) {
+    let csvPath, source;
+    if (punchRowCount(tmpPath) > 0) {
+        fs.renameSync(tmpPath, outputPath);
+        csvPath = outputPath; source = 'fresh';
+    } else {
+        fs.rmSync(tmpPath, { force: true });
+        const fallback = lastGoodTimesheet(outputPath);
+        csvPath = fallback || outputPath;
+        source  = fallback ? 'fallback' : 'none';
+    }
+    const rows = parseCSV(csvPath);
+    return {
+        source, csvPath,
+        week:   computeWeekModel(rows),
+        today:  computeTodayModel(rows),
+        claude: computeClaudeUsage(),
+    };
+}
+
+// GUI entry point: fetch + build models without any interactive prompts. Throws a
+// typed CREDENTIALS_MISSING / LOGIN_FAILED error the renderer turns into a message.
+async function loadTimesheetForApp({ startDate = '', endDate = '', log = () => {} } = {}) {
+    await ensureChromium(log);
+    const username = await keytar.getPassword(SERVICE, 'username');
+    const password = await keytar.getPassword(SERVICE, 'password');
+    if (!username || !password) {
+        const e = new Error('No saved credentials. Run "Get-Timesheet.bat -SaveCredential" in a terminal first.');
+        e.code = 'CREDENTIALS_MISSING';
+        throw e;
+    }
+    const outputPath = defaultOutputPath();
+    const tmpPath    = outputPath + '.download';
+    await scrape(username, password, startDate, endDate, tmpPath, log);
+    return resolveFetched(outputPath, tmpPath);
+}
+
+// Spawn the Electron desktop app (default when run without --cli / -SaveCredential).
+function launchDesktopApp() {
+    const { spawn } = require('child_process');
+    let electronPath;
+    try { electronPath = require('electron'); }
+    catch { console.error(col.red('Electron is not installed. Run: npm install')); process.exit(1); }
+    const child = spawn(electronPath, [__dirname], { stdio: 'inherit' });
+    child.on('close', code => process.exit(code == null ? 0 : code));
+}
+
+async function main() {
     const args = parseArgs();
+
+    // Default experience is the desktop app; the console UI stays available via --cli.
+    // -SaveCredential always uses the terminal (it needs an interactive prompt).
+    if (!args.cli && !args.saveCredential) { launchDesktopApp(); return; }
+
+    await ensureChromium();
 
     // ── Credentials ──────────────────────────────────────────────────────────
     let username = await keytar.getPassword(SERVICE, 'username');
@@ -660,4 +908,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { rowMins, isLivePunch, rowsInCurrentWeek, parseCSV, combineDateTime, lastGoodTimesheet };
+module.exports = { rowMins, isLivePunch, rowsInCurrentWeek, parseCSV, combineDateTime, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage, loadTimesheetForApp };

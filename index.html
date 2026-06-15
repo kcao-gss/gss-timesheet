@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta http-equiv="Content-Security-Policy"
+          content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:;">
+    <title>GSS Timesheet</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Frameless custom chrome -->
+    <header class="titlebar">
+        <span class="titlebar__name">Timesheet</span>
+        <div class="titlebar__controls">
+            <button id="btn-min" class="winbtn winbtn--min" title="Minimize" aria-label="Minimize"></button>
+            <button id="btn-close" class="winbtn winbtn--close" title="Close" aria-label="Close"></button>
+        </div>
+    </header>
+
+    <main class="stage">
+        <!-- Loading -->
+        <section id="view-loading" class="view view--center">
+            <div class="orb"><div class="orb__ring"></div></div>
+            <p id="load-msg" class="load-msg">Waking up…</p>
+        </section>
+
+        <!-- Error / credentials -->
+        <section id="view-error" class="view view--center hidden">
+            <div class="glass error-card">
+                <div class="error-icon">!</div>
+                <h2 id="error-title">Something went wrong</h2>
+                <p id="error-msg" class="muted"></p>
+                <button id="btn-retry" class="pill-btn">Try again</button>
+            </div>
+        </section>
+
+        <!-- Dashboard -->
+        <section id="view-dash" class="view hidden">
+            <div class="glass card card--head reveal">
+                <div class="head__top">
+                    <span class="eyebrow" id="week-of">Week of —</span>
+                    <span id="source-chip" class="chip hidden"></span>
+                </div>
+                <div class="head__figure">
+                    <span id="remaining-big" class="figure">—</span>
+                    <span id="remaining-label" class="figure-label">remaining this week</span>
+                </div>
+            </div>
+
+            <div class="glass card card--bars reveal">
+                <div class="card__label">Daily Hours</div>
+                <div id="bars" class="bars"></div>
+            </div>
+
+            <div class="glass card card--today reveal">
+                <div class="card__label">
+                    Today
+                    <span id="live-pill" class="live-pill hidden"><i></i>live</span>
+                </div>
+                <ul id="today-list" class="rows"></ul>
+            </div>
+
+            <div class="glass card card--friday reveal" id="friday-card">
+                <div class="card__label">Friday Estimate</div>
+                <p id="friday-text" class="friday-text"></p>
+                <p id="friday-sub" class="muted small"></p>
+            </div>
+
+            <div class="glass card card--claude reveal" id="claude-card">
+                <div class="card__label">Claude Code · Usage</div>
+                <div class="meter" id="meter-session"></div>
+                <div class="meter" id="meter-weekly"></div>
+            </div>
+        </section>
+    </main>
+
+    <script src="renderer.js"></script>
+</body>
+</html>

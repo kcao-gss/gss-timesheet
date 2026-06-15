@@ -1,62 +1,73 @@
 # gss-timesheet
 
-Downloads your GSS Time & Attendance timesheet and displays weekly statistics — all from the command line.
+Your GSS Time & Attendance week at a glance — a small **Apple-glass desktop app**
+(Electron) with a terminal fallback. Logs into the GSS ServiceWeb portal with
+Playwright, exports your punch data, and shows weekly hours, a daily vertical-bar
+chart, today's clock-out target, and a Friday estimate.
 
-## What it does
-
-Logs into the GSS ServiceWeb portal using Playwright, exports your punch data as a CSV, and prints a formatted weekly summary with hours worked, days worked, 40-hour progress, and a Friday clock-out estimate.
+## Quick start
 
 ```
-  Time & Attendance  --  Week of Jun 2, 2026
-  --------------------------------------------------
-  Total Worked         36:15   [██████████████████  ] 91%
-  Days Worked          4
-  Avg / Day            9:04
-  40-hr Target         3:45 remaining
-
-  --------------------------------------------------
-  Friday Estimate
-
-  Clock out at 4:00 PM Friday to hit 40:00.
+npm install            # one-time (installs Electron + Playwright)
+Get-Timesheet.bat -SaveCredential   # one-time: store your GSS login (Windows Credential Manager)
+npm start              # launch the desktop app   (or double-click Timesheet.bat)
 ```
 
-## Requirements
+On first run Playwright downloads Chromium (~100 MB, one-time).
 
-- Windows
-- Node.js
+## The desktop app
 
-Playwright and Chromium are installed automatically on first run (~100 MB download).
+A frameless liquid-glass window showing:
 
-## Setup
+- **Hours Remaining** for the week (flips to overtime once you hit 40).
+- **Daily Hours** — a vertical bar per weekday (weekends only if worked); the active day glows.
+- **Today** — clocked-in time, a default lunch break (12:00–1:00 PM), and your clock-out-by time.
+- **Friday Estimate** — when to clock out to hit 40.
+- **Claude Code usage** — a small secondary card.
 
-Save your GSS credentials to Windows Credential Manager (one-time):
+If the portal hands back an empty export, the app falls back to the last saved week
+(and says so) instead of showing a confusing blank.
+
+### Build a standalone .exe
+
+```
+npm run dist           # -> dist/GSS-Timesheet.exe (portable, no install)
+```
+
+## Terminal version
+
+The original CLI is still available:
+
+```
+npm run cli                              # this week's summary as text
+Get-Timesheet.bat --cli                  # same, via the launcher
+Get-Timesheet.bat --cli -StartDate "6/1/2026" -EndDate "6/5/2026"
+```
+
+## Credentials
 
 ```
 Get-Timesheet.bat -SaveCredential
 ```
 
-You'll be prompted for your username and password. They're stored securely in Windows Credential Manager under the service `gss-timesheet` and can only be accessed by your Windows account.
+Stored in Windows Credential Manager under the service `gss-timesheet`, readable only
+by your Windows account. The desktop app reads them automatically; if none are saved
+it shows a friendly prompt to run the command above.
 
-## Usage
+## Tests
 
 ```
-# Download timesheet for the current week and show stats
-Get-Timesheet.bat
-
-# Filter by date range
-Get-Timesheet.bat -StartDate "6/1/2026" -EndDate "6/5/2026"
-
-# Save the CSV to a custom location
-Get-Timesheet.bat -OutputPath "C:\path\to\timesheet.csv"
+npm test               # unit tests for the timesheet math + models
 ```
 
-CSV files default to `.\timesheets\timesheet-YYYY-Www.csv` (ISO week number).
-
-## Parameters
+## Parameters (CLI / credential mode)
 
 | Parameter | Description |
 |---|---|
-| `-SaveCredential` | Prompt for and save credentials to Windows Credential Manager |
+| `--cli` | Render the text summary instead of launching the app |
+| `-SaveCredential` | Prompt for and save credentials |
 | `-StartDate` | Optional start date filter (e.g. `"6/1/2026"`) |
 | `-EndDate` | Optional end date filter (e.g. `"6/5/2026"`) |
 | `-OutputPath` | Custom path to save the CSV |
+
+CSV files default to `.\timesheets\timesheet-YYYY-Www.csv` (ISO week number).

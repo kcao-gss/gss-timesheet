@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
-const { rowMins, isLivePunch, rowsInCurrentWeek, lastGoodTimesheet } = require('./Get-Timesheet.js');
+const { rowMins, isLivePunch, rowsInCurrentWeek, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage } = require('./Get-Timesheet.js');
 
 let pass = 0, fail = 0;
 function test(name, fn) {
@@ -66,6 +66,56 @@ test('lastGoodTimesheet returns a file that has current-week rows', () => {
         fs.writeFileSync(w25, `${HEADER}\n${dstr(now)},08:00 AM,${dstr(now)},04:00 PM,480,Time and Attendance\n`);
         assert.strictEqual(lastGoodTimesheet(w25, now), w25);
     });
+});
+
+test('computeWeekModel: completed Monday rolls into day 0 and totals', () => {
+    const m = computeWeekModel([thisWeek], now);
+    assert.strictEqual(m.hasData, true);
+    assert.strictEqual(m.totalMins, 480);
+    assert.strictEqual(m.remaining, 1920);
+    assert.strictEqual(m.daysWorked, 1);
+    assert.strictEqual(m.days[0].name, 'Mon');
+    assert.strictEqual(m.days[0].mins, 480);
+    assert.strictEqual(m.days[0].pct, 100);
+    assert.strictEqual(m.days[0].full, true);
+    assert.strictEqual(m.days[5].show, false); // Sat hidden when not worked
+});
+
+test('computeWeekModel: live punch today is active and counts to now', () => {
+    const m = computeWeekModel([liveToday], now);
+    assert.strictEqual(m.isActive, true);
+    assert.strictEqual(m.days[0].mins, 120); // 09:00 -> 11:00
+    assert.strictEqual(m.days[0].active, true);
+});
+
+test('computeWeekModel: Monday projects a Friday need', () => {
+    const m = computeWeekModel([thisWeek], now);
+    assert.strictEqual(m.friday.applicable, true);
+    assert.strictEqual(m.friday.kind, 'need');
+    assert.strictEqual(m.friday.needMins, 480);
+    assert.ok(m.friday.fridayDateStr.includes('Fri'));
+});
+
+test('computeWeekModel: no current-week rows -> hasData false', () => {
+    const m = computeWeekModel([lastWeek], now);
+    assert.strictEqual(m.hasData, false);
+});
+
+test('computeTodayModel: active day yields clock-out-by and fixed lunch', () => {
+    const m = computeTodayModel([liveToday], now);
+    assert.strictEqual(m.hasData, true);
+    assert.strictEqual(m.clockedIn, '9:00 AM');
+    assert.strictEqual(m.breakStr, '12:00 PM – 1:00 PM');
+    assert.strictEqual(m.status, 'clockout');
+    assert.strictEqual(m.clockOutBy, '5:00 PM'); // 9:00 + 8h worked
+});
+
+test('computeTodayModel: no punches today -> hasData false', () => {
+    assert.strictEqual(computeTodayModel([lastWeek], now).hasData, false);
+});
+
+test('computeClaudeUsage: returns an availability flag without throwing', () => {
+    assert.strictEqual(typeof computeClaudeUsage(now).available, 'boolean');
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);
