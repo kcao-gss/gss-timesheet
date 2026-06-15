@@ -35,8 +35,25 @@ async function start() {
     showView('loading');
     $('load-msg').textContent = 'Connecting to GSS…';
     const res = await window.api.load();
-    if (res.ok) render(res.data);
+    if (res.ok) { render(res.data); startTimers(); }
     else        renderError(res);
+}
+
+// Keep the dashboard alive all day: a cheap local recompute every minute (worked
+// minutes + Claude usage tick with the clock) and a full re-scrape every 20 min to
+// catch new punches. Both update in place — no loading flash, no re-animation.
+let timersStarted = false;
+function startTimers() {
+    if (timersStarted) return;
+    timersStarted = true;
+    setInterval(async () => {
+        const r = await window.api.recompute();
+        if (r && r.ok) render(r.data, { animate: false });
+    }, 60_000);
+    setInterval(async () => {
+        const r = await window.api.load();
+        if (r && r.ok) render(r.data, { animate: false });
+    }, 20 * 60_000);
 }
 
 function renderError({ code, message }) {
@@ -49,7 +66,8 @@ function renderError({ code, message }) {
 }
 
 // ── Dashboard ──────────────────────────────────────────────────────────────────
-function render({ week, today, claude, source }) {
+function render({ week, today, claude, source }, opts = {}) {
+    const animate = opts.animate !== false;
     $('week-of').textContent = `Week of ${week.weekOf}`;
 
     // source chip (only when we fell back / have nothing fresh)
@@ -61,17 +79,17 @@ function render({ week, today, claude, source }) {
     renderHeadline(week);
 
     if (week.hasData) {
-        renderBars(week.days);
+        renderBars(week.days, animate);
         renderToday(today);
         renderFriday(week.friday);
-        renderClaude(claude);
+        renderClaude(claude, animate);
         show($('friday-card'), week.friday.applicable && week.friday.kind);
     } else {
         // Empty week: keep it honest and quiet.
         $('bars').innerHTML = `<p class="muted" style="margin:auto">No punches recorded this week yet.</p>`;
         show($('view-dash').querySelector('.card--today'), false);
         show($('friday-card'), false);
-        renderClaude(claude);
+        renderClaude(claude, animate);
     }
 
     showView('dash');
@@ -92,7 +110,7 @@ function renderHeadline(week) {
     }
 }
 
-function renderBars(days) {
+function renderBars(days, animate = true) {
     const wrap = $('bars');
     wrap.innerHTML = '';
     for (const d of days) {
@@ -105,9 +123,14 @@ function renderBars(days) {
             <span class="bar__day">${d.name}</span>
             <span class="bar__date">${d.date}</span>`;
         wrap.appendChild(bar);
-        // animate fill after layout so the height transition runs
         const fill = bar.querySelector('.bar__fill');
-        requestAnimationFrame(() => requestAnimationFrame(() => { fill.style.height = `${d.pct}%`; }));
+        if (animate) {
+            // grow from 0 after layout so the height transition runs
+            requestAnimationFrame(() => requestAnimationFrame(() => { fill.style.height = `${d.pct}%`; }));
+        } else {
+            fill.style.transition = 'none'; // live refresh — snap, don't re-grow
+            fill.style.height = `${d.pct}%`;
+        }
     }
 }
 
@@ -167,16 +190,19 @@ function renderFriday(f) {
     }
 }
 
-function renderClaude(c) {
+function renderClaude(c, animate = true) {
     const card = $('claude-card');
     if (!c || !c.available) { show(card, false); return; }
     show(card, true);
     $('meter-session').innerHTML = meterHTML('Session', c.session);
     $('meter-weekly').innerHTML  = meterHTML('Weekly',  c.weekly);
-    // animate widths
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-        card.querySelectorAll('.meter__fill').forEach(el => { el.style.width = el.dataset.pct + '%'; });
-    }));
+    if (animate) {
+        requestAnimationFrame(() => requestAnimationFrame(() => {
+            card.querySelectorAll('.meter__fill').forEach(el => { el.style.width = el.dataset.pct + '%'; });
+        }));
+    } else {
+        card.querySelectorAll('.meter__fill').forEach(el => { el.style.transition = 'none'; el.style.width = el.dataset.pct + '%'; });
+    }
 }
 
 function meterHTML(name, m) {

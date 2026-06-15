@@ -5,9 +5,10 @@
 
 const { app, BrowserWindow, ipcMain } = require('electron');
 const path = require('path');
-const { loadTimesheetForApp } = require('./Get-Timesheet.js');
+const { loadTimesheetForApp, modelsFromCsv } = require('./Get-Timesheet.js');
 
 let win;
+let last = { csvPath: null, source: null }; // remembered for no-scrape live refreshes
 
 function createWindow() {
     win = new BrowserWindow({
@@ -38,7 +39,18 @@ ipcMain.handle('timesheet:load', async () => {
     const send = msg => { if (win && !win.isDestroyed()) win.webContents.send('timesheet:progress', msg); };
     try {
         const data = await loadTimesheetForApp({ log: send });
+        last = { csvPath: data.csvPath, source: data.source };
         return { ok: true, data };
+    } catch (err) {
+        return { ok: false, code: err.code || 'ERROR', message: err.message };
+    }
+});
+
+// Cheap live refresh: rebuild models from the last CSV + current time, no scrape.
+ipcMain.handle('timesheet:recompute', () => {
+    if (!last.csvPath) return { ok: false };
+    try {
+        return { ok: true, data: { source: last.source, csvPath: last.csvPath, ...modelsFromCsv(last.csvPath) } };
     } catch (err) {
         return { ok: false, code: err.code || 'ERROR', message: err.message };
     }

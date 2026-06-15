@@ -797,6 +797,14 @@ function defaultOutputPath() {
 
 // Resolve a freshly-downloaded temp export against the empty-export fallback, then
 // build the display models. Shared by the CLI and the desktop app.
+// Build the display models from a CSV on disk (no scrape) — used for live in-app
+// refreshes so worked-minutes and Claude usage tick with the clock, without
+// re-downloading. computeWeekModel/computeTodayModel default to the current time.
+function modelsFromCsv(csvPath) {
+    const rows = parseCSV(csvPath);
+    return { week: computeWeekModel(rows), today: computeTodayModel(rows), claude: computeClaudeUsage() };
+}
+
 function resolveFetched(outputPath, tmpPath) {
     let csvPath, source;
     if (punchRowCount(tmpPath) > 0) {
@@ -808,13 +816,7 @@ function resolveFetched(outputPath, tmpPath) {
         csvPath = fallback || outputPath;
         source  = fallback ? 'fallback' : 'none';
     }
-    const rows = parseCSV(csvPath);
-    return {
-        source, csvPath,
-        week:   computeWeekModel(rows),
-        today:  computeTodayModel(rows),
-        claude: computeClaudeUsage(),
-    };
+    return { source, csvPath, ...modelsFromCsv(csvPath) };
 }
 
 // GUI entry point: fetch + build models without any interactive prompts. Throws a
@@ -917,4 +919,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { rowMins, isLivePunch, rowsInCurrentWeek, parseCSV, combineDateTime, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage, loadTimesheetForApp };
+module.exports = { rowMins, isLivePunch, rowsInCurrentWeek, parseCSV, combineDateTime, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage, loadTimesheetForApp, modelsFromCsv };
