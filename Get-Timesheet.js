@@ -67,6 +67,7 @@ function combineDateTime(dateVal, timeVal) {
 }
 
 function parseCSV(filePath) {
+    if (!fs.existsSync(filePath)) return [];
     const lines   = fs.readFileSync(filePath, 'utf8').replace(/\r/g, '').split('\n');
     const headers = parseLine(lines[0]);
     return lines.slice(1)
@@ -105,25 +106,69 @@ function askPassword(question) {
     });
 }
 
+// A punch is "live" (an ongoing session) only when it's open AND was clocked in
+// today. An open punch (1900 end-date) left over from a previous day is a
+// forgotten clock-out / stale export — treating it as live makes `now - clock-in`
+// accrue days of phantom hours.
+function isLivePunch(row, now = new Date()) {
+    if (!row['End Date'].includes('1900')) return false;
+    const timeIn = combineDateTime(row['Start Date'], row['Time In ']);
+    return timeIn.toDateString() === now.toDateString();
+}
+
+// Minutes for a punch row. For a genuinely live punch compute from clock-in to
+// now; otherwise use the portal's recorded 'Hours' snapshot.
+function rowMins(row, now = new Date()) {
+    if (isLivePunch(row, now)) {
+        const timeIn = combineDateTime(row['Start Date'], row['Time In ']);
+        return Math.max(0, Math.round((now.getTime() - timeIn) / 60000));
+    }
+    return parseInt(row['Hours'].trim(), 10) || 0;
+}
+
+// Keep only punch rows whose Start Date falls in the current Mon–Sun week, so the
+// summary always reflects this week regardless of how wide an export (or fallback
+// file) the portal handed back.
+function rowsInCurrentWeek(rows, now = new Date()) {
+    const start = new Date(now);
+    start.setDate(start.getDate() + (start.getDay() === 0 ? -6 : 1 - start.getDay()));
+    start.setHours(0, 0, 0, 0);
+    const end = new Date(start);
+    end.setDate(start.getDate() + 7);
+    return rows.filter(r => {
+        const d = new Date(r['Start Date'].trim());
+        return d >= start && d < end;
+    });
+}
+
 // Count punch rows in a CSV, treating any read/parse failure as 0.
 function punchRowCount(p) {
     try { return fs.existsSync(p) ? parseCSV(p).length : 0; }
     catch { return 0; }
 }
 
+// Count punch rows that fall in the current Mon–Sun week — the same definition
+// showWeekStats uses to render. A file can hold rows yet zero current-week rows
+// (e.g. last week's file), in which case it would render "No punch data found",
+// so it must NOT qualify as a fallback.
+function currentWeekRowCount(p, now = new Date()) {
+    try { return fs.existsSync(p) ? rowsInCurrentWeek(parseCSV(p), now).length : 0; }
+    catch { return 0; }
+}
+
 // Pick the last good timesheet to fall back on when a fresh export is empty:
 // prefer the current week's existing file, else the most-recently-modified
-// timesheets/*.csv that actually contains punch data. Returns null if nothing
-// usable exists.
-function lastGoodTimesheet(outputPath) {
-    if (punchRowCount(outputPath) > 0) return outputPath;
+// timesheets/*.csv that actually contains current-week punch data. Returns null
+// if nothing usable exists.
+function lastGoodTimesheet(outputPath, now = new Date()) {
+    if (currentWeekRowCount(outputPath, now) > 0) return outputPath;
     const dir = path.dirname(outputPath);
     let candidates = [];
     try {
         candidates = fs.readdirSync(dir)
             .filter(f => f.endsWith('.csv'))
             .map(f => path.join(dir, f))
-            .filter(p => p !== outputPath && punchRowCount(p) > 0)
+            .filter(p => p !== outputPath && currentWeekRowCount(p, now) > 0)
             .map(p => ({ p, mtime: fs.statSync(p).mtimeMs }))
             .sort((a, b) => b.mtime - a.mtime);
     } catch { /* timesheets dir missing — no candidates */ }
@@ -168,7 +213,7 @@ function showTodayStats(rows) {
             timeIn:  combineDateTime(r['Start Date'], r['Time In ']),
             active:  r['End Date'].includes('1900'),
             timeOut: r['End Date'].includes('1900') ? null : combineDateTime(r['End Date'], r['Time Out ']),
-            mins:    parseInt(r['Hours'].trim(), 10),
+            mins:    rowMins(r),
         }))
         .sort((a, b) => a.timeIn - b.timeIn);
 
@@ -208,8 +253,90 @@ function showTodayStats(rows) {
     console.log('');
 }
 
+function formatTokens(n) {
+    if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+    if (n >= 1e3) return Math.round(n / 1e3) + 'K';
+    return String(n);
+}
+
+// ── Claude usage bars ───────────────────────────────────────────────────────
+// Claude does NOT expose your real plan limits to any script (those live only in
+// the in-app /usage view). So these bars track your real local token usage against
+// SELF-SET budgets. Tune the two budgets to match what /usage shows you, and set
+// WEEKLY_RESET to your real weekly reset (read it from /usage once).
+// Calibrated 2026-06-11 against /usage (both bars read ~3%) on the $100 Max 5x plan.
+// Re-calibrate when usage is higher for more precision: budget = my_tokens / (usage% / 100).
+const SESSION_BUDGET = 13_000_000;           // ~5-hour window budget (calibrated)
+const WEEKLY_BUDGET  = 800_000_000;          // weekly budget (calibrated)
+const WEEKLY_RESET   = { day: 6, hour: 18 }; // Sat 6pm Central (from /usage); 0=Sun..6=Sat
+
+function bar20(pct) {
+    const filled = Math.max(0, Math.min(20, Math.round(20 * pct / 100)));
+    return '█'.repeat(filled) + '░'.repeat(20 - filled);
+}
+
+function showClaudeUsage() {
+    const root = path.join(require('os').homedir(), '.claude', 'projects');
+    if (!fs.existsSync(root)) return;
+
+    const now = new Date();
+
+    // Weekly window: most recent WEEKLY_RESET day/hour at or before now.
+    const weekStart = new Date(now);
+    weekStart.setDate(now.getDate() - ((now.getDay() - WEEKLY_RESET.day + 7) % 7));
+    weekStart.setHours(WEEKLY_RESET.hour, 0, 0, 0);
+    if (weekStart > now) weekStart.setDate(weekStart.getDate() - 7);
+
+    // Session window: rolling 5 hours (Claude's session limit window).
+    const sessionStart = new Date(now.getTime() - 5 * 3600 * 1000);
+
+    let weekTok = 0, sessTok = 0, sessFirst = null;
+
+    const files = [];
+    for (const dir of fs.readdirSync(root)) {
+        const d = path.join(root, dir);
+        if (!fs.statSync(d).isDirectory()) continue;
+        for (const f of fs.readdirSync(d)) if (f.endsWith('.jsonl')) files.push(path.join(d, f));
+    }
+    for (const file of files) {
+        let lines;
+        try { lines = fs.readFileSync(file, 'utf8').split('\n'); } catch { continue; }
+        for (const line of lines) {
+            if (!line.includes('"usage"')) continue;
+            let o; try { o = JSON.parse(line); } catch { continue; }
+            const u = o.message && o.message.usage;
+            if (!u || !o.timestamp) continue;
+            const t   = new Date(o.timestamp);
+            const tok = (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_creation_input_tokens || 0);
+            if (t >= weekStart)    weekTok += tok;
+            if (t >= sessionStart) { sessTok += tok; if (!sessFirst || t < sessFirst) sessFirst = t; }
+        }
+    }
+
+    const until = d => {
+        const ms = Math.max(0, d - now), h = Math.floor(ms / 3600000), m = Math.floor(ms % 3600000 / 60000);
+        return h >= 24 ? `${Math.floor(h / 24)}d ${h % 24}h` : `${h}h ${m}m`;
+    };
+    const fmtReset = d => d.toLocaleString('en-US', { weekday: 'short', hour: 'numeric', minute: '2-digit', hour12: true });
+    const colFor   = p => p >= 90 ? col.red : p >= 70 ? col.yellow : s => s;
+
+    const sessPct   = Math.floor(100 * sessTok / SESSION_BUDGET);
+    const weekPct    = Math.floor(100 * weekTok / WEEKLY_BUDGET);
+    const sessReset  = sessFirst ? new Date(sessFirst.getTime() + 5 * 3600 * 1000) : null;
+    const weekReset  = new Date(weekStart.getTime() + 7 * 24 * 3600 * 1000);
+
+    console.log(col.gray('  ' + '-'.repeat(50)));
+    console.log(col.cyan('  Claude Code  --  Usage'));
+    console.log('');
+    console.log(colFor(sessPct)(`  ${'Session'.padEnd(8)} [${bar20(sessPct)}] ${String(sessPct).padStart(3)}%  ${formatTokens(sessTok)}/${formatTokens(SESSION_BUDGET)}`));
+    console.log(col.gray(`  ${''.padEnd(8)} ${sessReset ? 'resets in ' + until(sessReset) : 'idle'}`));
+    console.log(colFor(weekPct)(`  ${'Weekly'.padEnd(8)} [${bar20(weekPct)}] ${String(weekPct).padStart(3)}%  ${formatTokens(weekTok)}/${formatTokens(WEEKLY_BUDGET)}`));
+    console.log(col.gray(`  ${''.padEnd(8)} resets ${fmtReset(weekReset)}  (${until(weekReset)})`));
+    console.log('');
+}
+
 function showWeekStats(csvPath) {
-    const rows = parseCSV(csvPath);
+    const rows = rowsInCurrentWeek(parseCSV(csvPath));
     if (!rows.length) { console.log(col.yellow('  No punch data found.')); return; }
 
     let totalMins = 0;
@@ -217,11 +344,11 @@ function showWeekStats(csvPath) {
     let isActive = false;
 
     for (const row of rows) {
-        const mins   = parseInt(row['Hours'].trim(), 10);
+        const mins   = rowMins(row);
         totalMins   += mins;
         const dayKey = new Date(row['Start Date'].trim()).toISOString().slice(0, 10);
         const timeIn = combineDateTime(row['Start Date'], row['Time In ']);
-        const active = row['End Date'].includes('1900');
+        const active = isLivePunch(row);
         if (active) isActive = true;
         if (!workDays[dayKey]) workDays[dayKey] = [];
         workDays[dayKey].push({ timeIn, active, mins });
@@ -242,9 +369,6 @@ function showWeekStats(csvPath) {
     const targetMins    = 2400;
     const remaining     = Math.max(0, targetMins - totalMins);
     const overtime      = Math.max(0, totalMins - targetMins);
-    const pct           = Math.min(100, Math.floor((totalMins / targetMins) * 100));
-    const barFilled     = Math.floor(20 * pct / 100);
-    const bar           = '█'.repeat(barFilled) + '░'.repeat(20 - barFilled);
 
     const today   = new Date();
     const dow     = today.getDay();
@@ -256,17 +380,37 @@ function showWeekStats(csvPath) {
     console.log(col.cyan(`  Time & Attendance  --  Week of ${weekMon.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' })}`));
     console.log(col.gray('  ' + '-'.repeat(50)));
 
-    const mainCol = remaining === 0 ? col.green : pct >= 75 ? col.yellow : s => s;
-    console.log(mainCol(`  ${'Total Worked'.padEnd(18)}  ${formatHM(totalMins).padStart(7)}   [${bar}] ${String(pct).padStart(3)}%`));
-    console.log(`  ${'Days Worked'.padEnd(18)}  ${String(daysWorked).padStart(7)}`);
-    console.log(`  ${'Avg / Day'.padEnd(18)}  ${formatHM(avgMinsPerDay).padStart(7)}`);
+    // ── Daily breakdown ─────────────────────────────────────────────────────
+    // One bar per day, scaled to the 8-hr day target. Weekdays always show (so a
+    // skipped day is visible); weekends only show when something was worked.
+    const DAY_TARGET = 480;
+    const dayNames   = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+    console.log(col.cyan('  Daily Hours'));
+    console.log('');
+    for (let i = 0; i < 7; i++) {
+        const d = new Date(weekMon);
+        d.setDate(weekMon.getDate() + i);
+        d.setHours(0, 0, 0, 0);
+        const key     = d.toISOString().slice(0, 10);
+        const punches = workDays[key] || [];
+        const mins    = punches.reduce((s, p) => s + p.mins, 0);
+        if (i >= 5 && mins === 0) continue; // hide empty weekends
+        const pct    = Math.min(100, Math.round(100 * mins / DAY_TARGET));
+        const label  = `${dayNames[i]} ${d.toLocaleDateString('en-US', { month: 'numeric', day: 'numeric' })}`;
+        const active = punches.some(p => p.active);
+        const hrs    = mins ? formatHM(mins) : '--';
+        const tint   = mins >= DAY_TARGET ? col.green : mins > 0 ? col.yellow : col.gray;
+        console.log(tint(`  ${label.padEnd(10)} [${bar20(pct)}] ${hrs.padStart(5)}${active ? ' *' : ''}`));
+    }
+    console.log('');
     if (remaining > 0) {
         console.log(col.yellow(`  ${'Hours Remaining'.padEnd(18)}  ${formatHM(remaining).padStart(7)}`));
     } else {
         console.log(col.green(`  ${'40-hr Target'.padEnd(18)}  ${'DONE'.padStart(7)}   (+ ${formatHM(overtime)} overtime)`));
     }
-    if (isActive) console.log(col.darkYellow('  * Clock-in active -- hours include current session'));
     console.log('');
+
+    showClaudeUsage();
 
     showTodayStats(rows);
 
@@ -294,6 +438,8 @@ function showWeekStats(csvPath) {
         if (isActive) {
             const clockOut = new Date(Date.now() + remaining * 60000);
             console.log(col.yellow(`  Stay clocked in until  ${fmt(clockOut)}  (need ${formatHM(remaining)} more)`));
+            console.log(col.gray(`  (this is the 40-hr week target; "Clock out by" above is the 8-hr day target --`));
+            console.log(col.gray(`   if it's earlier, you banked extra time Mon-Thu)`));
         } else {
             const todayKey    = today.toISOString().slice(0, 10);
             const todayWorked = (workDays[todayKey] || []).reduce((s, p) => s + p.mins, 0);
@@ -338,7 +484,10 @@ async function scrape(username, password, startDate, endDate, outputPath) {
     try {
         // ── Login ──────────────────────────────────────────────────────────
         console.log('Logging in...');
-        await page.goto('https://www.gss-service.com/Logon');
+        // 'domcontentloaded' instead of default 'load' — a hanging third-party
+        // resource can stall the load event past 30s even though the form is
+        // ready; the waitForSelector below is the real readiness check.
+        await page.goto('https://www.gss-service.com/Logon', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForSelector('#TxtUsername_I');
         await page.fill('#TxtUsername_I', username);
         await page.fill('#passPassword_I', password);
@@ -360,7 +509,7 @@ async function scrape(username, password, startDate, endDate, outputPath) {
 
         // ── Time & Attendance ──────────────────────────────────────────────
         console.log('Loading Time and Attendance...');
-        await page.goto('https://www.gss-service.com/TimeAttendance/Index');
+        await page.goto('https://www.gss-service.com/TimeAttendance/Index', { waitUntil: 'domcontentloaded', timeout: 60000 });
         await page.waitForSelector('[name="StartDateSearch2"]');
 
         if (startDate) {
@@ -435,7 +584,7 @@ async function promptAndSaveCredentials() {
     return { username, password };
 }
 
-(async () => {
+async function main() {
     // Ensure Chromium is installed
     try {
         const b = await chromium.launch({ headless: true });
@@ -502,7 +651,13 @@ async function promptAndSaveCredentials() {
         }
     }
 
-})().catch(err => {
-    console.error(col.red(`\nERROR: ${err.message}`));
-    process.exit(1);
-});
+}
+
+if (require.main === module) {
+    main().catch(err => {
+        console.error(col.red(`\nERROR: ${err.message}`));
+        process.exit(1);
+    });
+}
+
+module.exports = { rowMins, isLivePunch, rowsInCurrentWeek, parseCSV, combineDateTime, lastGoodTimesheet };
