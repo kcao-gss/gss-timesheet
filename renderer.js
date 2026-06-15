@@ -10,6 +10,18 @@ function showView(name) {
     for (const [k, el] of Object.entries(views)) show(el, k === name);
 }
 
+// Scale the whole dashboard to fit the current window — no scrollbar, ever.
+const stageEl = document.querySelector('.stage');
+function fitDash() {
+    const dash = views.dash;
+    if (dash.classList.contains('hidden')) return;
+    dash.style.transform = 'translateX(-50%) scale(1)';      // reset to measure natural size
+    const natW = dash.offsetWidth, natH = dash.offsetHeight; // unaffected by transforms
+    const scale = Math.min((stageEl.clientWidth - 16) / natW, (stageEl.clientHeight - 12) / natH, 1.3);
+    dash.style.transform = `translateX(-50%) scale(${scale})`;
+}
+window.addEventListener('resize', fitDash);
+
 // ── Title-bar controls ──────────────────────────────────────────────────────
 $('btn-min').addEventListener('click', () => window.api.minimize());
 $('btn-close').addEventListener('click', () => window.api.close());
@@ -63,6 +75,7 @@ function render({ week, today, claude, source }) {
     }
 
     showView('dash');
+    requestAnimationFrame(() => requestAnimationFrame(fitDash));
 }
 
 function renderHeadline(week) {
