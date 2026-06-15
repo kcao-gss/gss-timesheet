@@ -4,7 +4,7 @@ const assert = require('assert');
 const fs   = require('fs');
 const os   = require('os');
 const path = require('path');
-const { rowMins, isLivePunch, rowsInCurrentWeek, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage } = require('./Get-Timesheet.js');
+const { rowMins, isLivePunch, rowsInCurrentWeek, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage, sessionWindowStart } = require('./Get-Timesheet.js');
 
 let pass = 0, fail = 0;
 function test(name, fn) {
@@ -126,6 +126,21 @@ test('computeTodayModel: no punches today -> hasData false', () => {
 
 test('computeClaudeUsage: returns an availability flag without throwing', () => {
     assert.strictEqual(typeof computeClaudeUsage(now).available, 'boolean');
+});
+
+const H = 3600 * 1000;
+test('sessionWindowStart anchors to the first message of the current 5h block', () => {
+    // a block at 0/+1h/+2h, then a >5h gap, then a new block at +9h
+    assert.strictEqual(sessionWindowStart([0, 1 * H, 2 * H, 9 * H], 5 * H), 9 * H);
+});
+test('sessionWindowStart returns the first message when all fit one window', () => {
+    assert.strictEqual(sessionWindowStart([100, 100 + 1 * H, 100 + 4 * H], 5 * H), 100);
+});
+test('sessionWindowStart opens a new window exactly at the 5h boundary', () => {
+    assert.strictEqual(sessionWindowStart([0, 5 * H], 5 * H), 5 * H);
+});
+test('sessionWindowStart returns null for no activity', () => {
+    assert.strictEqual(sessionWindowStart([], 5 * H), null);
 });
 
 console.log(`\n${pass} passed, ${fail} failed`);

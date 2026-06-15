@@ -276,6 +276,16 @@ function bar20(pct) {
     return '█'.repeat(filled) + '░'.repeat(20 - filled);
 }
 
+// First message of the current 5-hour session block: walk timestamps ascending and
+// open a new window whenever a message lands at/after the previous window's end.
+function sessionWindowStart(timesMs, windowMs = 5 * 3600 * 1000) {
+    let start = null;
+    for (const t of [...timesMs].sort((a, b) => a - b)) {
+        if (start === null || t >= start + windowMs) start = t;
+    }
+    return start;
+}
+
 // Scan ~/.claude logs and return token usage vs. the self-set budgets — pure data,
 // so both the CLI bars and the desktop card render from it. Returns { available:false }
 // when there are no Claude logs on this machine.
@@ -289,10 +299,10 @@ function computeClaudeUsage(now = new Date()) {
     weekStart.setHours(WEEKLY_RESET.hour, 0, 0, 0);
     if (weekStart > now) weekStart.setDate(weekStart.getDate() - 7);
 
-    // Session window: rolling 5 hours (Claude's session limit window).
-    const sessionStart = new Date(now.getTime() - 5 * 3600 * 1000);
+    const WIN = 5 * 3600 * 1000; // Claude's 5-hour session window
 
-    let weekTok = 0, sessTok = 0, sessFirst = null;
+    let weekTok = 0;
+    const entries = []; // {ms, tok} inside the weekly window — also used for session tiling
 
     const files = [];
     for (const dir of fs.readdirSync(root)) {
@@ -308,12 +318,20 @@ function computeClaudeUsage(now = new Date()) {
             let o; try { o = JSON.parse(line); } catch { continue; }
             const u = o.message && o.message.usage;
             if (!u || !o.timestamp) continue;
-            const t   = new Date(o.timestamp);
+            const t = new Date(o.timestamp);
+            if (t < weekStart) continue;
             const tok = (u.input_tokens || 0) + (u.output_tokens || 0) + (u.cache_creation_input_tokens || 0);
-            if (t >= weekStart)    weekTok += tok;
-            if (t >= sessionStart) { sessTok += tok; if (!sessFirst || t < sessFirst) sessFirst = t; }
+            weekTok += tok;
+            entries.push({ ms: t.getTime(), tok });
         }
     }
+
+    // Session = the current 5-hour block, anchored at the first message after the last
+    // >5h gap. (Using the trailing-window edge made "resets in" stick at 0h 0m during
+    // continuous use.) Once the block has fully elapsed with no new activity, it's idle.
+    const winStart   = sessionWindowStart(entries.map(e => e.ms), WIN);
+    const sessActive = winStart != null && winStart + WIN > now.getTime();
+    const sessTok    = sessActive ? entries.reduce((s, e) => (e.ms >= winStart ? s + e.tok : s), 0) : 0;
 
     const until = d => {
         const ms = Math.max(0, d - now), h = Math.floor(ms / 3600000), m = Math.floor(ms % 3600000 / 60000);
@@ -323,7 +341,7 @@ function computeClaudeUsage(now = new Date()) {
 
     const sessPct   = Math.floor(100 * sessTok / SESSION_BUDGET);
     const weekPct    = Math.floor(100 * weekTok / WEEKLY_BUDGET);
-    const sessReset  = sessFirst ? new Date(sessFirst.getTime() + 5 * 3600 * 1000) : null;
+    const sessReset  = sessActive ? new Date(winStart + WIN) : null;
     const weekReset  = new Date(weekStart.getTime() + 7 * 24 * 3600 * 1000);
 
     return {
@@ -919,4 +937,4 @@ if (require.main === module) {
     });
 }
 
-module.exports = { rowMins, isLivePunch, rowsInCurrentWeek, parseCSV, combineDateTime, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage, loadTimesheetForApp, modelsFromCsv };
+module.exports = { rowMins, isLivePunch, rowsInCurrentWeek, parseCSV, combineDateTime, lastGoodTimesheet, computeWeekModel, computeTodayModel, computeClaudeUsage, loadTimesheetForApp, modelsFromCsv, sessionWindowStart };
