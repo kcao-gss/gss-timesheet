@@ -104,9 +104,14 @@ function renderToday(t) {
     show($('live-pill'), !!t.isActive);
     if (!t.hasData) { list.innerHTML = ''; return; }
 
+    const brk =
+        !t.breaks || t.breaks.length === 0 ? { v: 'None yet' } :
+        t.breaks.length === 1              ? { v: `${t.breaks[0].from} – ${t.breaks[0].to}`, tail: `${t.breaks[0].mins} min` } :
+                                             { v: `${t.breaks.length} breaks`, tail: `${t.breaks.reduce((s, b) => s + b.mins, 0)} min` };
+
     const rows = [
         { glyph: '◷', cls: '',         k: 'Clocked in', v: t.clockedIn },
-        { glyph: '☕', cls: 'is-amber', k: 'Break',      v: t.breakStr },
+        { glyph: '☕', cls: 'is-amber', k: 'Break',      v: brk.v, tail: brk.tail },
     ];
     if (t.status === 'done') {
         rows.push({ glyph: '✓', cls: 'is-green', k: 'Eight-hour day', v: 'Complete', tail: `+${t.overHM}` });

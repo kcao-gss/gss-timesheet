@@ -101,13 +101,23 @@ test('computeWeekModel: no current-week rows -> hasData false', () => {
     assert.strictEqual(m.hasData, false);
 });
 
-test('computeTodayModel: active day yields clock-out-by and fixed lunch', () => {
+test('computeTodayModel: single live punch yields clock-out-by and no break yet', () => {
     const m = computeTodayModel([liveToday], now);
     assert.strictEqual(m.hasData, true);
     assert.strictEqual(m.clockedIn, '9:00 AM');
-    assert.strictEqual(m.breakStr, '12:00 PM – 1:00 PM');
+    assert.strictEqual(m.breaks.length, 0);
     assert.strictEqual(m.status, 'clockout');
     assert.strictEqual(m.clockOutBy, '5:00 PM'); // 9:00 + 8h worked
+});
+
+test('computeTodayModel: break is detected from the gap between punches', () => {
+    const am = { 'Start Date': dstr(now), 'Time In ': '07:55 AM', 'End Date': dstr(now), 'Time Out ': '12:02 PM', 'Hours': '247' };
+    const pm = { 'Start Date': dstr(now), 'Time In ': '12:31 PM', 'End Date': '1/1/1900 12:00:00 AM', 'Time Out ': '12:00 AM', 'Hours': '77' };
+    const m = computeTodayModel([pm, am], now); // unsorted on purpose
+    assert.strictEqual(m.breaks.length, 1);
+    assert.strictEqual(m.breaks[0].mins, 29); // 12:02 -> 12:31
+    assert.strictEqual(m.breaks[0].from, '12:02 PM');
+    assert.strictEqual(m.breaks[0].to, '12:31 PM');
 });
 
 test('computeTodayModel: no punches today -> hasData false', () => {

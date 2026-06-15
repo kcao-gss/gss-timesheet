@@ -43,8 +43,8 @@ stack, one system-blue accent.
   (flips to "40-hr target met (+overtime)" when complete). No progress ring.
 - **Daily Hours:** **vertical** bars, Mon–Fri always (Sat/Sun only if worked), each
   scaled to the 8h day target; hours labeled above, day below; active day glows.
-- **Today card:** three rows — `Clocked in`, `Break 12:00 PM – 1:00 PM` (fixed default,
-  informational only), `Clock out by`.
+- **Today card:** three rows — `Clocked in`, `Break` (the real lunch, detected from
+  the gap between punches; "None yet" if you haven't clocked out/in), `Clock out by`.
 - **Friday Estimate card.**
 - **Claude usage:** small secondary glass card (de-emphasized).
 - **States:** glass loading view ("Logging in… Exporting…") and a friendly
@@ -52,8 +52,8 @@ stack, one system-blue accent.
 
 ## Decisions
 
-- **Clock-out-by math unchanged** (worked-hours based). The displayed lunch is
-  informational; it does NOT add an hour to clock-out.
+- **Clock-out-by math unchanged** (worked-hours based). Breaks are real gaps between
+  punches, so they're naturally excluded from worked minutes — no extra adjustment.
 - **Old CLI** retained behind a `--cli` flag (preserves existing tests + a debug path).
 - **Scraper unchanged** — Playwright stays; Chromium downloads on first run (~100 MB)
   with a progress message instead of a blocking `execSync`.

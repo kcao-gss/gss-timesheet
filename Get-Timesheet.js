@@ -485,10 +485,19 @@ function computeTodayModel(allRows, now = new Date()) {
 
     const fmt = d => d.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true });
     const punches = todayRows.map(r => ({
-        timeIn: combineDateTime(r['Start Date'], r['Time In ']),
-        active: r['End Date'].includes('1900'),
-        mins:   rowMins(r, now),
+        timeIn:  combineDateTime(r['Start Date'], r['Time In ']),
+        active:  r['End Date'].includes('1900'),
+        timeOut: r['End Date'].includes('1900') ? null : combineDateTime(r['End Date'], r['Time Out ']),
+        mins:    rowMins(r, now),
     })).sort((a, b) => a.timeIn - b.timeIn);
+
+    // Real breaks: the gap between one punch clocking out and the next clocking in.
+    const breaks = [];
+    for (let i = 0; i < punches.length - 1; i++) {
+        if (!punches[i].timeOut) continue;
+        const mins = Math.round((punches[i + 1].timeIn - punches[i].timeOut) / 60000);
+        if (mins > 0) breaks.push({ from: fmt(punches[i].timeOut), to: fmt(punches[i + 1].timeIn), mins });
+    }
 
     const isActive       = punches.some(p => p.active);
     const totalTodayMins = punches.reduce((s, p) => s + p.mins, 0);
@@ -498,7 +507,7 @@ function computeTodayModel(allRows, now = new Date()) {
     const model = {
         hasData:   true,
         clockedIn: fmt(punches[0].timeIn),
-        breakStr:  '12:00 PM – 1:00 PM', // fixed default lunch (informational only)
+        breaks,
         totalHM:   formatHM(totalTodayMins),
         isActive,
     };
