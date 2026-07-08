@@ -199,9 +199,11 @@ function showTodayStats(rows) {
     if (deficit <= 0) {
         console.log(col.green(`  ${'8-hr target'.padEnd(18)}  done!  (+${formatHM(-deficit)} over)`));
     } else if (isActive) {
-        const active   = [...punches].filter(p => p.active).pop();
-        const clockOut = new Date(active.timeIn.getTime() + (480 - completedMins) * 60000);
-        console.log(col.yellow(`  ${'Clock out by'.padEnd(18)}  ${fmt(clockOut)}  (${formatHM(deficit)} remaining)`));
+        const active      = [...punches].filter(p => p.active).pop();
+        const lunchBuffer = anyBreak ? 0 : 60;
+        const clockOut    = new Date(active.timeIn.getTime() + (480 - completedMins + lunchBuffer) * 60000);
+        const lunchNote   = lunchBuffer ? '  +1 hr lunch' : '';
+        console.log(col.yellow(`  ${'Clock out by'.padEnd(18)}  ${fmt(clockOut)}  (${formatHM(deficit)} remaining${lunchNote})`));
     } else {
         console.log(col.yellow(`  ${'8-hr target'.padEnd(18)}  need ${formatHM(deficit)} more today`));
     }
